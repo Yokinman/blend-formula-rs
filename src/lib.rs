@@ -4,16 +4,37 @@ use proc_macro::{TokenStream, TokenTree, token_stream::IntoIter};
 use std::iter::Peekable;
 
 use std::cmp::{PartialOrd, Ordering};
+use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 #[proc_macro]
 pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
-	let term = parse_formula(&mut token_stream.into_iter().peekable(), false);
-	// panic!("{}", simplify_term(term));
+	let mut token_iter = token_stream.into_iter().peekable();
 	
-	if let Some(formula) = term_formula(simplify_term(term)) {
-		let (src_factor_name, dst_factor_name, op_name) = formula;
-		format!("\
+	let formula = match parse_formula(&mut token_iter, false) {
+		Ok(t) => term_formula(simplify_term(t)),
+		
+		 // Operation Shortcuts:
+		Err((None, ParseError::ExpectedTerm(TokenTree::Punct(punct))))
+		if token_iter.peek().is_none() => match punct.as_char() {
+			'*' => Some(("Dst", "Zero", "Add")),
+			'+' => Some(("One", "One", "Add")),
+			'<' => Some(("One", "One", "Min")),
+			'>' => Some(("One", "One", "Max")),
+			_ => panic!("{}", ParseError::ExpectedTerm(TokenTree::Punct(punct)))
+		},
+		Err((Some(Term::Zero), ParseError::ExpectedTerm(TokenTree::Punct(punct))))
+		if token_iter.peek().is_none() && punct == '-' => {
+			Some(("One", "One", "Sub"))
+		},
+		
+		 // Parse Failure:
+		Err((_, err)) => panic!("{}", err),
+	};
+	
+	 // Valid Formula:
+	if let Some((src_factor_name, dst_factor_name, op_name)) = formula {
+		let text = format!("\
 			blend_formula::BlendFormula {{\
 				src_factor: blend_formula::BlendFactor::{},\
 				dst_factor: blend_formula::BlendFactor::{},\
@@ -22,16 +43,16 @@ pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
 			src_factor_name,
 			dst_factor_name,
 			op_name,
-		).parse().unwrap()
+		);
+		return text.parse().unwrap()
 	}
 	
-	else {
-		panic!("formula must evaluate to 'Term*Factor Op Term*Factor', where:\
-			\n- each 'Term' is either 'src' or 'dst' (mutually-exclusive)\
-			\n- each 'Factor' is either '0', '1', 'Term', '1-Term', 'Term.a', '1-Term.a', 'c', '1-c', or 'src.a<1-dst.a'\
-			\n- 'Op' is either '+', '-', '<', or '>'\
-		")
-	}
+	 // Invalid Formula:
+	panic!("formula must evaluate to 'Term*Factor Op Term*Factor', where:\
+		\n- each Term is either 'src' or 'dst' (mutually-exclusive)\
+		\n- each Factor is: '0', '1', 'Term', '1-Term', 'Term.a', '1-Term.a', 'c', '1-c', or 'src.a<1-dst.a'\
+		\n- Op is: '+', '-', '<', or '>'\
+	")
 }
 
 fn term_formula(term: Term) -> Option<(&'static str, &'static str, &'static str)> {
@@ -61,15 +82,15 @@ fn gen_formula_map() {
 		("Zero",              Term::Zero),
 		("One",               Term::One),
 		("Src",               Term::Src),
-		("Dst",               Term::Dst),
-		("Constant",          Term::Constant),
 		("SrcAlpha",          src_alpha.clone()),
+		("Dst",               Term::Dst),
 		("DstAlpha",          dst_alpha.clone()),
+		("Constant",          Term::Constant),
 		("OneMinusSrc",       linear_term(Term::One, LinearOp::Minus, Term::Src)),
-		("OneMinusDst",       linear_term(Term::One, LinearOp::Minus, Term::Dst)),
-		("OneMinusConstant",  linear_term(Term::One, LinearOp::Minus, Term::Constant)),
 		("OneMinusSrcAlpha",  linear_term(Term::One, LinearOp::Minus, src_alpha.clone())),
+		("OneMinusDst",       linear_term(Term::One, LinearOp::Minus, Term::Dst)),
 		("OneMinusDstAlpha",  one_minus_dst_alpha.clone()),
+		("OneMinusConstant",  linear_term(Term::One, LinearOp::Minus, Term::Constant)),
 		("SaturatedSrcAlpha", comparison_term(src_alpha, ComparisonOp::Min, one_minus_dst_alpha)),
 	];
 	
@@ -290,28 +311,6 @@ impl Display for ComparisonOp {
 	}
 }
 
-macro_rules! panic_expected {
-	($a:ty, $b:expr) => {
-		panic!("expected {}; got '{}'", <$a>::TEXT, $b)
-	};
-	($a:literal, $b:expr) => {
-		panic!("expected {}; got '{}'", $a, $b)
-	};
-}
-
-trait PanicExpected: Sized + 'static {
-	const TEXT: &'static str;
-}
-impl PanicExpected for Term {
-	const TEXT: &'static str = "'0', '1', 'src', 'dst', or 'c'";
-}
-impl PanicExpected for BlendSuffix {
-	const TEXT: &'static str = "'rgb' or 'a'";
-}
-impl PanicExpected for LinearOp {
-	const TEXT: &'static str = "'.', '*', '+', '-', '<', or '>'";
-}
-
 fn suffix_term(term: Term, suf: BlendSuffix) -> Term {
 	Term::SuffixTerm(Box::new(term), suf)
 }
@@ -325,116 +324,220 @@ fn comparison_term(a: Term, op: ComparisonOp, b: Term) -> Term {
 	Term::Comparison(Box::new(a), op, Box::new(b))
 }
 
-fn parse_formula(token_iter: &mut Peekable<IntoIter>, is_comparison: bool) -> Term {
-	let mut term = parse_term(token_iter);
-	while let Some(token) = token_iter.next() {
-		if let TokenTree::Punct(p) = token {
-			let prev = std::mem::replace(&mut term, Term::Zero);
-			term = match p.as_char() {
-				'+' => linear_term(prev, LinearOp::Plus,  parse_term(token_iter)),
-				'-' => linear_term(prev, LinearOp::Minus, parse_term(token_iter)),
-				'<' => {
-					let next_term = parse_formula(token_iter, true);
-					if is_comparison {
-						panic!("chained comparison operators require parentheses");
-					}
-					comparison_term(prev, ComparisonOp::Min, next_term)
-				},
-				'>' => {
-					let next_term = parse_formula(token_iter, true);
-					if is_comparison {
-						panic!("chained comparison operators require parentheses");
-					}
-					comparison_term(prev, ComparisonOp::Max, next_term)
-				},
-				chr => panic_expected!(LinearOp, chr)
-			};
-		} else {
-			panic_expected!(LinearOp, token);
-		}
-	}
-	term
+#[derive(Debug)]
+enum ParseError {
+	ExpectedTerm(TokenTree),
+	ExpectedTermGotEnd,
+	ExpectedOp(TokenTree),
+	ExpectedSuffix(TokenTree),
+	ExpectedSuffixGotEnd,
+	AmbiguousComparison,
+	NestedSuffix(Vec<BlendSuffix>),
 }
 
-fn parse_term(token_iter: &mut Peekable<IntoIter>) -> Term {
+impl Display for ParseError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		const TERM_TEXT: &'static str = "'0', '1', 'src', 'dst', 'c'";
+		const OP_TEXT: &'static str = "'.', '*', '+', '-', '<', '>'";
+		const SUFFIX_TEXT: &'static str = "'rgb', 'a'";
+		match self {
+			Self::ExpectedTerm(token) => {
+				write!(f, "expected term ({}); got '{}'", TERM_TEXT, token)
+			}
+			Self::ExpectedTermGotEnd => {
+				write!(f, "expected term ({}); got end", TERM_TEXT)
+			},
+			Self::ExpectedOp(token) => {
+				write!(f, "expected operator ({}); got '{}'", OP_TEXT, token)
+			}
+			Self::ExpectedSuffix(token) => {
+				write!(f, "expected suffix ({}); got '{}'", SUFFIX_TEXT, token)
+			}
+			Self::ExpectedSuffixGotEnd => {
+				write!(f, "expected suffix ({}); got end", SUFFIX_TEXT)
+			},
+			Self::AmbiguousComparison => {
+				write!(f, "chained comparison operators require parentheses")
+			},
+			Self::NestedSuffix(suf_list) => {
+				let mut text = String::new();
+				for suf in suf_list {
+					text.push('.');
+					text.push_str(&*suf.to_string());
+				}
+				write!(f, "a term can only have one suffix; got '{}'", text)
+			},
+		}
+	}
+}
+
+impl Error for ParseError {}
+
+fn parse_formula(token_iter: &mut Peekable<IntoIter>, is_comparison: bool)
+	-> Result<Term, (Option<Term>, ParseError)>
+{
+	let mut term = parse_term(token_iter)?;
+	while let Some(token) = token_iter.next() {
+		if let TokenTree::Punct(punct) = token {
+			let prev = std::mem::replace(&mut term, Term::Zero);
+			term = match punct.as_char() {
+				'+' | '-' => {
+					let op = if punct == '+' {
+						LinearOp::Plus
+					} else {
+						LinearOp::Minus
+					};
+					match parse_term(token_iter) {
+						Ok(next) => linear_term(prev, op, next),
+						Err((None,       err)) => return Err((Some(prev), err)),
+						Err((Some(next), err)) => return Err((
+							Some(linear_term(prev, op, next)),
+							err
+						)),
+					}
+				},
+				'<' | '>' => {
+					if is_comparison {
+						return Err((Some(prev), ParseError::AmbiguousComparison));
+					}
+					let op = if punct == '<' {
+						ComparisonOp::Min
+					} else {
+						ComparisonOp::Max
+					};
+					match parse_formula(token_iter, true) {
+						Ok(next) => comparison_term(prev, op, next),
+						Err((None,       err)) => return Err((Some(prev), err)),
+						Err((Some(next), err)) => return Err((
+							Some(comparison_term(prev, op, next)),
+							err
+						)),
+					}
+				},
+				_ => return Err((
+					Some(prev),
+					ParseError::ExpectedOp(TokenTree::Punct(punct))
+				))
+			};
+		} else {
+			return Err((Some(term), ParseError::ExpectedOp(token)))
+		}
+	}
+	Ok(term)
+}
+
+fn parse_term(token_iter: &mut Peekable<IntoIter>)
+	-> Result<Term, (Option<Term>, ParseError)>
+{
 	let mut term = match token_iter.next() {
-		Some(TokenTree::Ident(t)) => match t.to_string().as_str() {
+		Some(TokenTree::Ident(ident)) => match ident.to_string().as_str() {
 			"src" => Term::Src,
 			"dst" => Term::Dst,
 			"c"   => Term::Constant,
-			other => panic_expected!(Term, other)
+			_ => return Err((
+				None,
+				ParseError::ExpectedTerm(TokenTree::Ident(ident))
+			))
 		},
-		Some(TokenTree::Literal(t)) => match t.to_string().as_str() {
+		Some(TokenTree::Literal(liter)) => match liter.to_string().as_str() {
 			"0" => Term::Zero,
 			"1" => Term::One,
-			other => panic_expected!(Term, other)
+			_ => return Err((
+				None,
+				ParseError::ExpectedTerm(TokenTree::Literal(liter))
+			))
 		},
-		Some(TokenTree::Group(t)) => match t.delimiter() {
-			proc_macro::Delimiter::Parenthesis => parse_formula(
-				&mut t.stream().into_iter().peekable(),
-				false
-			),
-			_ => panic_expected!("parentheses", t)
+		Some(TokenTree::Group(group)) => parse_formula(
+			&mut group.stream().into_iter().peekable(),
+			false
+		)?,
+		Some(TokenTree::Punct(punct)) => match punct.as_char() {
+			'-' => match parse_term(token_iter) {
+				Ok(t) => linear_term(Term::Zero, LinearOp::Minus, t),
+				Err((None, ParseError::ExpectedTermGotEnd)) => return Err((
+					Some(Term::Zero),
+					ParseError::ExpectedTerm(TokenTree::Punct(punct))
+				)),
+				Err((None,    err)) => return Err((Some(Term::Zero), err)),
+				Err((Some(t), err)) => return Err((
+					Some(linear_term(Term::Zero, LinearOp::Minus, t)),
+					err
+				)),
+			},
+			_ => return Err((
+				None,
+				ParseError::ExpectedTerm(TokenTree::Punct(punct))
+			))
 		},
-		Some(TokenTree::Punct(t)) => match t.as_char() {
-			'-' => linear_term(Term::Zero, LinearOp::Minus, parse_term(token_iter)),
-			other => panic_expected!(Term, other)
-		},
-		None => panic_expected!(Term, "None")
+		None => return Err((None, ParseError::ExpectedTermGotEnd))
 	};
 	
-	if let Some(suffix) = parse_term_suffix(token_iter) {
-		term = suffix_term(term, suffix)
-	}
+	term = match parse_term_suffix(token_iter) {
+		Ok(None) => term,
+		Ok(Some(suffix)) => suffix_term(term, suffix),
+		Err(error) => return Err((Some(term), error)),
+	};
 	
-	if let Some(factor) = parse_term_factor(token_iter) {
-		term = factor_term(term, factor)
-	}
+	term = match parse_term_factor(token_iter) {
+		Ok(None) => term,
+		Ok(Some(factor)) => factor_term(term, factor),
+		Err((_, error)) => return Err((Some(term), error)),
+	};
 	
-	term
+	Ok(term)
 }
 
-fn parse_term_suffix(token_iter: &mut Peekable<IntoIter>) -> Option<BlendSuffix> {
+fn parse_term_suffix(token_iter: &mut Peekable<IntoIter>)
+	-> Result<Option<BlendSuffix>, ParseError>
+{
 	match token_iter.peek() {
-		None => None,
 		Some(TokenTree::Punct(p)) => if *p == '.' {
 			token_iter.next();
 			if let Some(token) = token_iter.next() {
 				if let TokenTree::Ident(suf) = token {
-					if let Some(next_suf) = parse_term_suffix(token_iter) {
-						panic_expected!(
-							"no nested suffixes",
-							format!(".{}.{}", suf, next_suf)
-						);
-					}
-					Some(match suf.to_string().as_str() {
+					let suf = match suf.to_string().as_str() {
 						"rgb" => BlendSuffix::Color, // ??? .xyz
 						"a"   => BlendSuffix::Alpha, // ??? .w
-						other => panic_expected!(BlendSuffix, other)
-					})
+						_ => return Err(ParseError::ExpectedSuffix(TokenTree::Ident(suf)))
+					};
+					match parse_term_suffix(token_iter) {
+						Ok(None) => Ok(Some(suf)),
+						Ok(Some(next_suf)) => {
+							Err(ParseError::NestedSuffix(vec![suf, next_suf]))
+						},
+						Err(ParseError::NestedSuffix(mut nested_suf_list)) => {
+							nested_suf_list.insert(0, suf);
+							Err(ParseError::NestedSuffix(nested_suf_list))
+						}
+						error => error
+					}
 				} else {
-					panic_expected!(BlendSuffix, token);
+					Err(ParseError::ExpectedSuffix(token))
 				}
 			} else {
-				panic_expected!(BlendSuffix, "None");
+				Err(ParseError::ExpectedSuffixGotEnd)
 			}
 		} else {
-			None
+			Ok(None)
 		},
-		Some(token) => panic_expected!(LinearOp, token),
+		None => Ok(None),
+		_ => Err(ParseError::ExpectedOp(token_iter.next().unwrap())),
 	}
 }
 
-fn parse_term_factor(token_iter: &mut Peekable<IntoIter>) -> Option<Term> {
+fn parse_term_factor(token_iter: &mut Peekable<IntoIter>) -> Result<Option<Term>, (Option<Term>, ParseError)> {
 	match token_iter.peek() {
-		None => None,
 		Some(TokenTree::Punct(p)) => if *p == '*' {
 			token_iter.next();
-			Some(parse_term(token_iter))
+			Ok(Some(parse_term(token_iter)?))
 		} else {
-			None
+			Ok(None)
 		},
-		Some(token) => panic_expected!("*", token),
+		None => Ok(None),
+		_ => Err((
+			None,
+			ParseError::ExpectedOp(token_iter.next().unwrap())
+		)),
 	}
 }
 
@@ -464,10 +567,9 @@ fn simplify_suffix_term(term: Term, suf: BlendSuffix) -> Term {
 			simplify_suffix_term(*sub_a, suf),
 			simplify_suffix_term(*sub_b, suf)
 		),
-		Term::SuffixTerm(_, sub_suf) => panic_expected!(
-			"no nested suffixes",
-			format!(".{}.{}", sub_suf, suf)
-		),
+		Term::SuffixTerm(_, sub_suf) => {
+			panic!("{}", ParseError::NestedSuffix(vec![sub_suf, suf]))
+		},
 		term => suffix_term(term, suf)
 	}
 }
