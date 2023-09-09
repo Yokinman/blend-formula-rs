@@ -96,8 +96,8 @@ fn gen_formula_map() {
 			match_text.push_str(&*format!(
 				"\"{}\" => (\"{}\", \"{}\", \"{}\"),\n",
 				term,
-				a_factor_name,
-				b_factor_name,
+				if *op_name == "RevSub" { b_factor_name } else { a_factor_name },
+				if *op_name == "RevSub" { a_factor_name } else { b_factor_name },
 				op_name
 			));
 			formula_set.insert(term);
