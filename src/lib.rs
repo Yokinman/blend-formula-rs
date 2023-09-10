@@ -1,18 +1,88 @@
 #![crate_type = "proc-macro"]
 
-use proc_macro::{TokenStream, TokenTree, token_stream::IntoIter};
+use proc_macro::{TokenStream, TokenTree};
 use std::iter::Peekable;
 
 use std::cmp::{PartialOrd, Ordering};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::vec::IntoIter;
+
+type TokenIter = Peekable<IntoIter<TokenTree>>;
+
+#[proc_macro]
+pub fn blend_equation(token_stream: TokenStream) -> TokenStream {
+	let token_iter = token_stream.into_iter();
+	
+	let mut color_token_list = vec![];
+	let mut alpha_token_list = vec![];
+	
+	let token_group_list = [&mut color_token_list, &mut alpha_token_list];
+	let mut token_group_index = 0;
+	
+	for token in token_iter {
+		match token {
+			TokenTree::Punct(punct) if punct == ',' => {
+				token_group_index += 1;
+				if token_group_index > 1 {
+					panic!("too many comma-separated formulas");
+				}
+			},
+			token => token_group_list[token_group_index].push(token),
+		}
+	}
+	
+	let color_formula = blend_formula_string(
+		&mut color_token_list.into_iter().peekable(),
+		BlendSuffix::Color
+	);
+	
+	let alpha_formula = if token_group_index == 0 {
+		color_formula.clone()
+	} else {
+		blend_formula_string(
+			&mut alpha_token_list.into_iter().peekable(),
+			BlendSuffix::Alpha
+		)
+	};
+	
+	let text = format!("\
+		blend_formula::BlendEquation {{\n\
+			color: {},\n\
+			alpha: {},\n\
+		}}",
+		color_formula,
+		alpha_formula,
+	);
+	
+	text.parse().unwrap()
+}
 
 #[proc_macro]
 pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
-	let mut token_iter = token_stream.into_iter().peekable();
+	let mut token_iter = token_stream
+		.into_iter()
+		.collect::<Vec<TokenTree>>()
+		.into_iter()
+		.peekable();
 	
-	let formula = match parse_formula(&mut token_iter, false) {
-		Ok(t) => term_formula(simplify_term(t)),
+	blend_formula_string(&mut token_iter, BlendSuffix::Full)
+		.parse().unwrap()
+}
+
+fn blend_formula_string(token_iter: &mut TokenIter, dimension: BlendSuffix) -> String {
+	let formula = match parse_formula(token_iter, false) {
+		Ok(t) => {
+			let t_dimension = t.dimension().unwrap();
+			if t_dimension != dimension && t_dimension != BlendSuffix::Alpha {
+				panic!(
+					"expected a formula for '{}'; got a formula for '{}'",
+					dimension,
+					t_dimension
+				);
+			}
+			term_formula(simplify_term(t.clear_dimension(dimension)))
+		},
 		
 		 // Operation Shortcuts:
 		Err((None, ParseError::ExpectedTerm(TokenTree::Punct(punct))))
@@ -34,7 +104,7 @@ pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
 	
 	 // Valid Formula:
 	if let Some((src_factor_name, dst_factor_name, op_name)) = formula {
-		let text = format!("\
+		return format!("\
 			blend_formula::BlendFormula {{\
 				src_factor: blend_formula::BlendFactor::{},\
 				dst_factor: blend_formula::BlendFactor::{},\
@@ -43,8 +113,7 @@ pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
 			src_factor_name,
 			dst_factor_name,
 			op_name,
-		);
-		return text.parse().unwrap()
+		)
 	}
 	
 	 // Invalid Formula:
@@ -55,7 +124,9 @@ pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
 	")
 }
 
-fn term_formula(term: Term) -> Option<(&'static str, &'static str, &'static str)> {
+fn term_formula(term: Term)
+	-> Option<(&'static str, &'static str, &'static str)>
+{
 	let term = &*term.to_string();
 	Some(include!("formula_map.in"))
 }
@@ -160,6 +231,58 @@ impl Term {
 			Term::Comparison(..) => 8,
 		}
 	}
+	
+	fn dimension(&self) -> Option<BlendSuffix> {
+		match self {
+			Term::Zero     => Some(BlendSuffix::Alpha),
+			Term::One      => Some(BlendSuffix::Alpha),
+			Term::Src      => Some(BlendSuffix::Full),
+			Term::Dst      => Some(BlendSuffix::Full),
+			Term::Constant => Some(BlendSuffix::Full),
+			
+			Term::SuffixTerm(term, suffix) => if term.dimension()? >= *suffix {
+				Some(*suffix)
+			} else {
+				None
+			},
+			
+			Term::FactorTerm(a,    b) |
+			Term::LinearTerm(a, _, b) => match (a.dimension()?, b.dimension()?) {
+				(d, BlendSuffix::Alpha) |
+				(BlendSuffix::Alpha, d) => Some(d),
+				(a, b) if a == b => Some(a),
+				_ => None
+			},
+			
+			Term::Comparison(a, _, b) => match (a.dimension()?, b.dimension()?) {
+				(a, b) if a == b => Some(a),
+				_ => None
+			},
+		}
+	}
+	
+	fn clear_dimension(self, dimension: BlendSuffix) -> Self {
+		match self {
+			Term::SuffixTerm(term, suffix) if suffix == dimension => {
+				term.clear_dimension(dimension)
+			},
+			Term::FactorTerm(a, b) => factor_term(
+				a.clear_dimension(dimension),
+				b.clear_dimension(dimension)
+			),
+			Term::LinearTerm(a, op, b) => linear_term(
+				a.clear_dimension(dimension),
+				op,
+				b.clear_dimension(dimension)
+			),
+			Term::Comparison(a, op, b) => comparison_term(
+				a.clear_dimension(dimension),
+				op,
+				b.clear_dimension(dimension)
+			),
+			term => term
+		}
+	}
 }
 
 impl PartialOrd for Term {
@@ -211,10 +334,13 @@ impl Ord for Term {
 impl Display for Term {
 	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
 		fn par(outer: &Term, inner: &Term) -> String {
-			if outer.order() > inner.order() {
-				inner.to_string()
-			} else {
-				format!("({})", inner)
+			match Ord::cmp(&inner.order(), &outer.order()) {
+				Ordering::Greater => format!("({})", inner),
+				Ordering::Less    => inner.to_string(),
+				Ordering::Equal   => match outer {
+					Term::SuffixTerm(..) => inner.to_string(),
+					_ => format!("({})", inner)
+				},
 			}
 		}
 		match self {
@@ -250,13 +376,15 @@ impl Display for Term {
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 enum BlendSuffix {
-	Color,
 	Alpha,
+	Color,
+	Full,
 }
 
 impl Display for BlendSuffix {
 	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
 		match *self {
+			BlendSuffix::Full  => write!(f, "rgba"),
 			BlendSuffix::Color => write!(f, "rgb"),
 			BlendSuffix::Alpha => write!(f, "a"),
 		}
@@ -333,26 +461,27 @@ enum ParseError {
 	ExpectedSuffixGotEnd,
 	AmbiguousComparison,
 	NestedSuffix(Vec<BlendSuffix>),
+	IncompatibleDimension(Term),
 }
 
 impl Display for ParseError {
 	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-		const TERM_TEXT: &'static str = "'0', '1', 'src', 'dst', 'c'";
-		const OP_TEXT: &'static str = "'.', '*', '+', '-', '<', '>'";
-		const SUFFIX_TEXT: &'static str = "'rgb', 'a'";
+		const TERM_TEXT: &str = "'0', '1', 'src', 'dst', 'c'";
+		const OP_TEXT: &str = "'.', '*', '+', '-', '<', '>'";
+		const SUFFIX_TEXT: &str = "'rgb', 'a'";
 		match self {
 			Self::ExpectedTerm(token) => {
 				write!(f, "expected term ({}); got '{}'", TERM_TEXT, token)
-			}
+			},
 			Self::ExpectedTermGotEnd => {
 				write!(f, "expected term ({}); got end", TERM_TEXT)
 			},
 			Self::ExpectedOp(token) => {
 				write!(f, "expected operator ({}); got '{}'", OP_TEXT, token)
-			}
+			},
 			Self::ExpectedSuffix(token) => {
 				write!(f, "expected suffix ({}); got '{}'", SUFFIX_TEXT, token)
-			}
+			},
 			Self::ExpectedSuffixGotEnd => {
 				write!(f, "expected suffix ({}); got end", SUFFIX_TEXT)
 			},
@@ -363,9 +492,36 @@ impl Display for ParseError {
 				let mut text = String::new();
 				for suf in suf_list {
 					text.push('.');
-					text.push_str(&*suf.to_string());
+					text.push_str(&suf.to_string());
 				}
-				write!(f, "a term can only have one suffix; got '{}'", text)
+				write!(f, "terms can only have one suffix each; got '{}'", text)
+			},
+			Self::IncompatibleDimension(term) => match term {
+				Term::SuffixTerm(a, suf) => write!(f,
+					"can't apply the suffix '{}' to a {} term",
+					suf,
+					match a.dimension().unwrap() {
+						BlendSuffix::Full  => "'vec4'",
+						BlendSuffix::Color => "'vec3'",
+						BlendSuffix::Alpha => "scalar",
+					},
+				),
+				Term::FactorTerm(a, b) => write!(f,
+					"multiplying terms with incompatible dimensions ({} * {})",
+					a.dimension().unwrap(),
+					b.dimension().unwrap(),
+				),
+				Term::LinearTerm(a, op, b) => write!(f,
+					"combining terms with incompatible dimensions ({} {op} {})",
+					a.dimension().unwrap(),
+					b.dimension().unwrap(),
+				),
+				Term::Comparison(a, op, b) => write!(f,
+					"comparing terms with incompatible dimensions ({} {op} {})",
+					a.dimension().unwrap(),
+					b.dimension().unwrap(),
+				),
+				term => write!(f, "this error shouldn't occur: {:?}", term),
 			},
 		}
 	}
@@ -373,7 +529,7 @@ impl Display for ParseError {
 
 impl Error for ParseError {}
 
-fn parse_formula(token_iter: &mut Peekable<IntoIter>, is_comparison: bool)
+fn parse_formula(token_iter: &mut TokenIter, is_comparison: bool)
 	-> Result<Term, (Option<Term>, ParseError)>
 {
 	let mut term = parse_term(token_iter)?;
@@ -419,6 +575,14 @@ fn parse_formula(token_iter: &mut Peekable<IntoIter>, is_comparison: bool)
 					ParseError::ExpectedOp(TokenTree::Punct(punct))
 				))
 			};
+			
+			 // Incompatible Terms:
+			if term.dimension().is_none() {
+				return Err((
+					Some(term.clone()),
+					ParseError::IncompatibleDimension(term)
+				))
+			}
 		} else {
 			return Err((Some(term), ParseError::ExpectedOp(token)))
 		}
@@ -426,7 +590,7 @@ fn parse_formula(token_iter: &mut Peekable<IntoIter>, is_comparison: bool)
 	Ok(term)
 }
 
-fn parse_term(token_iter: &mut Peekable<IntoIter>)
+fn parse_term(token_iter: &mut TokenIter)
 	-> Result<Term, (Option<Term>, ParseError)>
 {
 	let mut term = match token_iter.next() {
@@ -448,7 +612,11 @@ fn parse_term(token_iter: &mut Peekable<IntoIter>)
 			))
 		},
 		Some(TokenTree::Group(group)) => parse_formula(
-			&mut group.stream().into_iter().peekable(),
+			&mut group.stream()
+				.into_iter()
+				.collect::<Vec<TokenTree>>()
+				.into_iter()
+				.peekable(),
 			false
 		)?,
 		Some(TokenTree::Punct(punct)) => match punct.as_char() {
@@ -472,22 +640,38 @@ fn parse_term(token_iter: &mut Peekable<IntoIter>)
 		None => return Err((None, ParseError::ExpectedTermGotEnd))
 	};
 	
-	term = match parse_term_suffix(token_iter) {
-		Ok(None) => term,
-		Ok(Some(suffix)) => suffix_term(term, suffix),
+	match parse_term_suffix(token_iter) {
+		Ok(None) => {},
+		Ok(Some(suffix)) => {
+			term = suffix_term(term, suffix);
+			if term.dimension().is_none() {
+				return Err((
+					Some(term.clone()),
+					ParseError::IncompatibleDimension(term)
+				))
+			}
+		},
 		Err(error) => return Err((Some(term), error)),
 	};
 	
-	term = match parse_term_factor(token_iter) {
-		Ok(None) => term,
-		Ok(Some(factor)) => factor_term(term, factor),
+	match parse_term_factor(token_iter) {
+		Ok(None) => {},
+		Ok(Some(factor)) => {
+			term = factor_term(term, factor);
+			if term.dimension().is_none() {
+				return Err((
+					Some(term.clone()),
+					ParseError::IncompatibleDimension(term)
+				))
+			}
+		},
 		Err((_, error)) => return Err((Some(term), error)),
 	};
 	
 	Ok(term)
 }
 
-fn parse_term_suffix(token_iter: &mut Peekable<IntoIter>)
+fn parse_term_suffix(token_iter: &mut TokenIter)
 	-> Result<Option<BlendSuffix>, ParseError>
 {
 	match token_iter.peek() {
@@ -525,7 +709,7 @@ fn parse_term_suffix(token_iter: &mut Peekable<IntoIter>)
 	}
 }
 
-fn parse_term_factor(token_iter: &mut Peekable<IntoIter>) -> Result<Option<Term>, (Option<Term>, ParseError)> {
+fn parse_term_factor(token_iter: &mut TokenIter) -> Result<Option<Term>, (Option<Term>, ParseError)> {
 	match token_iter.peek() {
 		Some(TokenTree::Punct(p)) => if *p == '*' {
 			token_iter.next();
@@ -567,9 +751,7 @@ fn simplify_suffix_term(term: Term, suf: BlendSuffix) -> Term {
 			simplify_suffix_term(*sub_a, suf),
 			simplify_suffix_term(*sub_b, suf)
 		),
-		Term::SuffixTerm(_, sub_suf) => {
-			panic!("{}", ParseError::NestedSuffix(vec![sub_suf, suf]))
-		},
+		Term::SuffixTerm(term, sub_suf) => Term::SuffixTerm(term, sub_suf),
 		term => suffix_term(term, suf)
 	}
 }
@@ -622,7 +804,7 @@ fn simplify_factor_term(a: Term, b: Term) -> Term {
 }
 
 fn simplify_linear_term(a: Term, op: LinearOp, b: Term) -> Term {
-	// 0 - (1 + (1 + (c + (c + (c + (src + (src + (src + (dst + (dst + dst))))))))))
+	// 0 - (1 + (1 + (c + (c + (src + (src + (src + (dst + (dst + dst)))))))))
 	// trace::trace!("? [{a}] {op} [{b}]");
 	match (simplify_term(a), op, simplify_term(b)) {
 		(Term::Zero, LinearOp::Plus, term)  |
