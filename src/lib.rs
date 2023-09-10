@@ -1,4 +1,5 @@
 pub use blend_formula_proc_macro::blend_formula;
+pub use blend_formula_proc_macro::blend_equation;
 
 #[derive(Debug, PartialEq)]
 pub enum BlendFactor {
@@ -77,12 +78,21 @@ fn blend_formulae() {
 	assert_eq!(blend_formula!(-), blend_formula!(src-dst));
 	assert_eq!(blend_formula!(<), blend_formula!(src<dst));
 	assert_eq!(blend_formula!(>), blend_formula!(src>dst));
-	 
-	// assert_eq!(blend_equation!(+),    BlendEquation { color: blend_formula!(+), alpha: blend_formula!(+) });
-	// assert_eq!(blend_equation!(+, <), BlendEquation { color: blend_formula!(+), alpha: blend_formula!(<) });
-	// assert_eq!(blend_equation!(-, +), BlendEquation { color: blend_formula!(-), alpha: blend_formula!(+) });
-	// assert_eq!(blend_equation!(<, >), BlendEquation { color: blend_formula!(<), alpha: blend_formula!(>) });
-	// assert_eq!(blend_equation!(>, -), BlendEquation { color: blend_formula!(>), alpha: blend_formula!(-) });
+	
+	assert_eq!(blend_equation!(+),    BlendEquation { color: blend_formula!(+), alpha: blend_formula!(+) });
+	assert_eq!(blend_equation!(+, <), BlendEquation { color: blend_formula!(+), alpha: blend_formula!(<) });
+	assert_eq!(blend_equation!(-, *), BlendEquation { color: blend_formula!(-), alpha: blend_formula!(*) });
+	assert_eq!(blend_equation!(<, >), BlendEquation { color: blend_formula!(<), alpha: blend_formula!(>) });
+	assert_eq!(blend_equation!(>, -), BlendEquation { color: blend_formula!(>), alpha: blend_formula!(-) });
+	
+	assert_eq!(blend_equation!(src.rgb*src.a + dst.rgb*(1 - src.a), src.a*dst.a), BlendEquation {
+		color: blend_formula!(src*src.a + dst*(1 - src.a)),
+		alpha: blend_formula!(src*dst)
+	});
+	assert_eq!(blend_equation!((src*src.a + dst*(1 - src.a)).rgb, (src*dst).a), BlendEquation {
+		color: blend_formula!(src*src.a + dst*(1 - src.a)),
+		alpha: blend_formula!(src*dst)
+	});
 }
 
 //      (rgba, 0)             => Zero;
