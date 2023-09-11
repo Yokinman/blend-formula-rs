@@ -11,7 +11,7 @@ keywords = ["macros", "wgpu", "utility"]
 categories = ["graphics","mathematics"]
 
 [dependencies]
-blend-formula-proc-macro = { version = "=0.1.0", path = "blend-formula-proc-macro" }
+blend-formula-proc-macro = { version = "0.1.1", path = "blend-formula-proc-macro" }
 wgpu = { version = "0.17", optional = true }
 
 [features]
