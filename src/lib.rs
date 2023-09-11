@@ -136,7 +136,7 @@ fn parse_blend_equation(token_iter: &mut TokenIter, dimension: BlendSuffix)
 		 // Operation Shortcuts:
 		Err((None, ParseError::ExpectedTerm(TokenTree::Punct(punct))))
 		if token_iter.peek().is_none() => match punct.as_char() {
-			'*' => Ok(("Dst", "Zero", "Add")),
+			'*' => Ok(("Zero", "Src", "Add")),
 			'+' => Ok(("One", "One", "Add")),
 			'<' => Ok(("One", "One", "Min")),
 			'>' => Ok(("One", "One", "Max")),
@@ -210,8 +210,8 @@ fn gen_formula_map() {
 	let mut match_text = String::from("match term {\n");
 	
 	for (op_name, term) in &operation_list {
-	for (b_factor_name, b_factor) in &factor_list {
 	for (a_factor_name, a_factor) in &factor_list {
+	for (b_factor_name, b_factor) in &factor_list {
 		let term = match term {
 			Term::LinearTerm(a, op, b) => simplify_linear_term(
 				factor_term(*a.clone(), a_factor.clone()),
