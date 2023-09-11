@@ -63,7 +63,7 @@
 //! - `blend_formula::BlendComponent` -> `wgpu::BlendComponent`
 //! - `blend_formula::BlendState` -> `wgpu::BlendState`
 
-/// Produces an equivalent [`BlendEquation`] from formulae, if one exists.
+/// Produces a [`BlendEquation`] equivalent to some formulae, if one exists.
 /// 
 /// Two comma-separated formulas can be given to provide separate
 /// formulas for the color and alpha channels.
@@ -71,7 +71,7 @@
 /// See the main [crate] documentation for more details.
 pub use blend_formula_proc_macro::blend_equation;
 
-/// Produces an equivalent [`BlendFormula`] from a formula, if one exists.
+/// Produces a [`BlendFormula`] equivalent to some formula, if one exists.
 /// 
 /// See the main [crate] documentation for more details.
 pub use blend_formula_proc_macro::blend_formula;
@@ -242,6 +242,9 @@ mod wgpu {
 
 #[test]
 fn saturated_src_alpha() {
+	//! Saturated source alpha uses a factor of "1" for the alpha channel, so
+	//! it's only usable as a color channel factor.
+	
 	use crate as blend_formula;
 	
 	use BlendFactor::*;
