@@ -77,7 +77,18 @@ pub fn blend_equation(token_stream: TokenStream) -> TokenStream {
 				BlendSuffix::Alpha
 			)
 		) {
-			(Ok(color), Ok(alpha)) => (color, alpha),
+			(Ok(color), Ok((alpha_src_factor, alpha_dst_factor, alpha_op))) => {
+				fn alp(s: &str) -> &str {
+					match s {
+						"Src" => "SrcAlpha",
+						"Dst" => "DstAlpha",
+						"OneMinusSrc" => "OneMinusSrcAlpha",
+						"OneMinusDst" => "OneMinusDstAlpha",
+						other => other
+					}
+				}
+				(color, (alp(alpha_src_factor), alp(alpha_dst_factor), alpha_op))
+			},
 			(Err(error), _) |
 			(_, Err(error)) => panic!("{}", error)
 		}
