@@ -158,4 +158,13 @@ fn blend_formulae() {
 		color: blend_formula!(src*src.a + dst*(1 - src.a)),
 		alpha: blend_formula!(src*dst)
 	});
+	
+	assert_eq!(blend_equation!(dst*(src.a < 1-dst.a)), BlendEquation {
+		color: BlendFormula { src_factor: Dst, dst_factor: OneMinusDst, operation: Min },
+		alpha: BlendFormula { src_factor: Dst, dst_factor: OneMinusDst, operation: Min }
+	});
+	assert_eq!(blend_equation!(dst.rgb*(src.a < 1-dst.a), dst.a*(src.a < 1-dst.a)), BlendEquation {
+		color: BlendFormula { src_factor: Zero, dst_factor: SaturatedSrcAlpha, operation: Add },
+		alpha: BlendFormula { src_factor: Dst,  dst_factor: OneMinusDst,       operation: Min }
+	});
 }
