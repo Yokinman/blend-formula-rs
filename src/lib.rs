@@ -23,7 +23,7 @@ pub fn blend_equation(token_stream: TokenStream) -> TokenStream {
 			TokenTree::Punct(punct) if punct == ',' => {
 				token_group_index += 1;
 				if token_group_index > 1 {
-					panic!("too many comma-separated formulas");
+					panic!("too many comma-separated formulae");
 				}
 			},
 			token => token_group_list[token_group_index].push(token),
@@ -528,19 +528,19 @@ impl Display for ParseError {
 				token
 			),
 			Self::ExpectedSuffix(token) => write!(f,
-				"expected suffix ({}); got '{}'",
+				"expected accessor ({}); got '{}'",
 				SUFFIX_TEXT,
 				token
 			),
 			Self::ExpectedSuffixGotEnd => write!(f,
-				"expected suffix ({}); got end",
+				"expected accessor ({}); got end",
 				SUFFIX_TEXT
 			),
 			Self::AmbiguousComparison => write!(f,
 				"chained comparison operators require parentheses"
 			),
 			Self::NestedSuffix(suf_list) => write!(f,
-				"terms can only have one suffix each; got '{}'",
+				"terms can only have one accessor each; got '{}'",
 				{
 					let mut text = String::new();
 					for suf in suf_list {
@@ -552,7 +552,7 @@ impl Display for ParseError {
 			),
 			Self::IncompatibleDimension(term) => match term {
 				Term::SuffixTerm(a, suf) => write!(f,
-					"can't apply the suffix '{}' to a {} term",
+					"can't apply the accessor '{}' to a {} term",
 					suf,
 					match a.dimension().unwrap() {
 						BlendSuffix::Full  => "'vec4'",
