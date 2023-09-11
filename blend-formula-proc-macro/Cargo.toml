@@ -1,17 +1,10 @@
 [package]
-name = "blend-formula"
-description = "macros for defining GPU blend modes from arbitrary formulae"
-authors = ["Yokin"]
+name = "blend-formula-proc-macro"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-readme = "README.md"
-keywords = ["macros", "wgpu", "utility"]
-categories = ["graphics","mathematics"]
+
+[lib]
+proc_macro = true
 
 [dependencies]
-blend-formula-proc-macro = { version = "=0.1.0", path = "blend-formula-proc-macro" }
-wgpu = { version = "0.17", optional = true }
-
-[features]
-wgpu = ["dep:wgpu"]
+#trace = { git = "https://github.com/Yokinman/trace-rs.git" }
