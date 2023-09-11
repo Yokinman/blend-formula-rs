@@ -15,15 +15,21 @@ pub enum BlendFactor {
 	OneMinusDst,
 	OneMinusDstAlpha,
 	OneMinusConstant,
+    /// min(SrcAlpha, OneMinusDstAlpha)
 	SaturatedSrcAlpha,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum BlendOperation {
+	// src + dst
 	Add,
+	// src - dst
 	Sub,
+	// dst - src
 	RevSub,
+	// min(src, dst)
 	Min,
+	// max(src, dst)
 	Max,
 }
 
@@ -48,6 +54,65 @@ impl Default for BlendFormula {
 pub struct BlendEquation {
 	color: BlendFormula,
 	alpha: BlendFormula,
+}
+
+#[cfg(feature = "wgpu")]
+mod wgpu {
+	use crate::BlendFactor;
+	use crate::BlendOperation;
+	use crate::BlendFormula;
+	use crate::BlendEquation;
+	
+	impl From<BlendFactor> for wgpu::BlendFactor {
+		fn from(value: BlendFactor) -> Self {
+			match value {
+				BlendFactor::Zero              => Self::Zero,
+				BlendFactor::One               => Self::One,
+				BlendFactor::Src               => Self::Src,
+				BlendFactor::SrcAlpha          => Self::SrcAlpha,
+				BlendFactor::Dst               => Self::Dst,
+				BlendFactor::DstAlpha          => Self::DstAlpha,
+				BlendFactor::Constant          => Self::Constant,
+				BlendFactor::OneMinusSrc       => Self::OneMinusSrc,
+				BlendFactor::OneMinusSrcAlpha  => Self::OneMinusSrcAlpha,
+				BlendFactor::OneMinusDst       => Self::OneMinusDst,
+				BlendFactor::OneMinusDstAlpha  => Self::OneMinusDstAlpha,
+				BlendFactor::OneMinusConstant  => Self::OneMinusConstant,
+				BlendFactor::SaturatedSrcAlpha => Self::SrcAlphaSaturated,
+			}
+		}
+	}
+	
+	impl From<BlendOperation> for wgpu::BlendOperation {
+		fn from(value: BlendOperation) -> Self {
+			match value {
+				BlendOperation::Add    => Self::Add,
+				BlendOperation::Sub    => Self::Subtract,
+				BlendOperation::RevSub => Self::ReverseSubtract,
+				BlendOperation::Min    => Self::Min,
+				BlendOperation::Max    => Self::Max,
+			}
+		}
+	}
+	
+	impl From<BlendFormula> for wgpu::BlendComponent {
+		fn from(value: BlendFormula) -> Self {
+			wgpu::BlendComponent {
+				src_factor: value.src_factor.into(),
+				dst_factor: value.dst_factor.into(),
+				operation: value.operation.into(),
+			}
+		}
+	}
+	
+	impl From<BlendEquation> for wgpu::BlendState {
+		fn from(value: BlendEquation) -> Self {
+			wgpu::BlendState {
+				color: value.color.into(),
+				alpha: value.alpha.into(),
+			}
+		}
+	}
 }
 
 #[test]
@@ -94,40 +159,3 @@ fn blend_formulae() {
 		alpha: blend_formula!(src*dst)
 	});
 }
-
-//      (rgba, 0)             => Zero;
-//      (rgba, 1)             => One;
-//      (rgba, src)           => Src;
-//      (rgba, src.a)         => SrcAlpha;
-//      (rgba, dst)           => Dst;
-//      (rgba, dst.a)         => DstAlpha;
-//      (rgba, c)             => Constant;
-//      (rgba, 1-src)         => OneMinusSrc;
-//      (rgba, 1-src.a)       => OneMinusSrcAlpha;
-//      (rgba, 1-dst)         => OneMinusDst;
-//      (rgba, 1-dst.a)       => OneMinusDstAlpha;
-//      (rgba, 1-c)           => OneMinusConstant;
-//      (rgba, src.a<1-dst.a) => SaturatedSrcAlpha;
-//  	
-//      (rgb, 0)             => Zero;
-//      (rgb, 1)             => One;
-//      (rgb, src)           => Src;
-//      (rgb, src.a)         => SrcAlpha;
-//      (rgb, dst)           => Dst;
-//      (rgb, dst.a)         => DstAlpha;
-//      (rgb, c)             => Constant;
-//      (rgb, 1-src)         => OneMinusSrc;
-//      (rgb, 1-src.a)       => OneMinusSrcAlpha;
-//      (rgb, 1-dst)         => OneMinusDst;
-//      (rgb, 1-dst.a)       => OneMinusDstAlpha;
-//      (rgb, 1-c)           => OneMinusConstant;
-//      (rgb, src.a<1-dst.a) => SaturatedSrcAlpha;
-//  	
-//      (a, 0)       => {wgpu::BlendFactor::Zero};
-//      (a, 1)       => {wgpu::BlendFactor::One};
-//      (a, src.a)   => {wgpu::BlendFactor::SrcAlpha};
-//      (a, dst.a)   => {wgpu::BlendFactor::DstAlpha};
-//      (a, c)       => {wgpu::BlendFactor::Constant};
-//      (a, 1-src.a) => {wgpu::BlendFactor::OneMinusSrcAlpha};
-//      (a, 1-dst.a) => {wgpu::BlendFactor::OneMinusDstAlpha};
-//      (a, 1-c)     => {wgpu::BlendFactor::OneMinusConstant};
