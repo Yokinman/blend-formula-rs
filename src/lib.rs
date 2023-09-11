@@ -1,5 +1,3 @@
-#![crate_type = "proc-macro"]
-
 use proc_macro::{TokenStream, TokenTree};
 use std::iter::Peekable;
 
@@ -32,18 +30,57 @@ pub fn blend_equation(token_stream: TokenStream) -> TokenStream {
 		}
 	}
 	
-	let color_formula = blend_formula_string(
-		&mut color_token_list.into_iter().peekable(),
-		BlendSuffix::Color
-	);
-	
-	let alpha_formula = if token_group_index == 0 {
-		color_formula.clone()
+	let (color_formula, alpha_formula) = if token_group_index == 0 {
+		alpha_token_list = color_token_list.clone();
+		match parse_blend_equation(
+			&mut color_token_list.into_iter().peekable(),
+			BlendSuffix::Full
+		) {
+			Ok(("SaturatedSrcAlpha", _, _)) |
+			Ok((_, "SaturatedSrcAlpha", _)) => {
+				alpha_token_list = vec![
+					TokenTree::Group(proc_macro::Group::new(
+						proc_macro::Delimiter::Parenthesis,
+						TokenStream::from_iter(alpha_token_list.into_iter())
+					)),
+					TokenTree::Punct(proc_macro::Punct::new(
+						'.',
+						proc_macro::Spacing::Alone
+					)),
+					TokenTree::Ident(proc_macro::Ident::new(
+						"a",
+						proc_macro::Span::call_site()
+					)),
+				];
+				match parse_blend_equation(
+					&mut alpha_token_list.into_iter().peekable(),
+					BlendSuffix::Alpha,
+				) {
+					Ok(formula) => (formula.clone(), formula),
+					Err(ParseError::InvalidFormula(_)) => {
+						panic!("{}", ParseError::InvalidFormula(BlendSuffix::Full))
+					},
+					Err(error) => panic!("{}", error),
+				}
+			},
+			Ok(formula) => (formula.clone(), formula),
+			Err(error) => panic!("{}", error),
+		}
 	} else {
-		blend_formula_string(
-			&mut alpha_token_list.into_iter().peekable(),
-			BlendSuffix::Alpha
-		)
+		match (
+			parse_blend_equation(
+				&mut color_token_list.into_iter().peekable(),
+				BlendSuffix::Color
+			),
+			parse_blend_equation(
+				&mut alpha_token_list.into_iter().peekable(),
+				BlendSuffix::Alpha
+			)
+		) {
+			(Ok(color), Ok(alpha)) => (color, alpha),
+			(Err(error), _) |
+			(_, Err(error)) => panic!("{}", error)
+		}
 	};
 	
 	let text = format!("\
@@ -51,8 +88,8 @@ pub fn blend_equation(token_stream: TokenStream) -> TokenStream {
 			color: {},\n\
 			alpha: {},\n\
 		}}",
-		color_formula,
-		alpha_formula,
+		format_blend_formula(color_formula),
+		format_blend_formula(alpha_formula),
 	);
 	
 	text.parse().unwrap()
@@ -66,62 +103,55 @@ pub fn blend_formula(token_stream: TokenStream) -> TokenStream {
 		.into_iter()
 		.peekable();
 	
-	blend_formula_string(&mut token_iter, BlendSuffix::Full)
-		.parse().unwrap()
+	match parse_blend_equation(&mut token_iter, BlendSuffix::Full) {
+		Ok(formula) => format_blend_formula(formula).parse().unwrap(),
+		Err(error) => panic!("{}", error),
+	}
 }
 
-fn blend_formula_string(token_iter: &mut TokenIter, dimension: BlendSuffix) -> String {
-	let formula = match parse_formula(token_iter, false) {
+fn parse_blend_equation(token_iter: &mut TokenIter, dimension: BlendSuffix)
+	-> Result<(&'static str, &'static str, &'static str), ParseError>
+{
+	match parse_formula(token_iter, false) {
 		Ok(t) => {
 			let t_dimension = t.dimension().unwrap();
 			if t_dimension != dimension && t_dimension != BlendSuffix::Alpha {
-				panic!(
-					"expected a formula for '{}'; got a formula for '{}'",
-					dimension,
-					t_dimension
-				);
+				return Err(ParseError::ExpectedDimension(dimension, t_dimension))
 			}
 			term_formula(simplify_term(t.clear_dimension(dimension)))
+				.ok_or(ParseError::InvalidFormula(dimension))
 		},
 		
 		 // Operation Shortcuts:
 		Err((None, ParseError::ExpectedTerm(TokenTree::Punct(punct))))
 		if token_iter.peek().is_none() => match punct.as_char() {
-			'*' => Some(("Dst", "Zero", "Add")),
-			'+' => Some(("One", "One", "Add")),
-			'<' => Some(("One", "One", "Min")),
-			'>' => Some(("One", "One", "Max")),
-			_ => panic!("{}", ParseError::ExpectedTerm(TokenTree::Punct(punct)))
+			'*' => Ok(("Dst", "Zero", "Add")),
+			'+' => Ok(("One", "One", "Add")),
+			'<' => Ok(("One", "One", "Min")),
+			'>' => Ok(("One", "One", "Max")),
+			_ => Err(ParseError::ExpectedTerm(TokenTree::Punct(punct)))
 		},
 		Err((Some(Term::Zero), ParseError::ExpectedTerm(TokenTree::Punct(punct))))
 		if token_iter.peek().is_none() && punct == '-' => {
-			Some(("One", "One", "Sub"))
+			Ok(("One", "One", "Sub"))
 		},
 		
-		 // Parse Failure:
-		Err((_, err)) => panic!("{}", err),
-	};
-	
-	 // Valid Formula:
-	if let Some((src_factor_name, dst_factor_name, op_name)) = formula {
-		return format!("\
-			blend_formula::BlendFormula {{\
-				src_factor: blend_formula::BlendFactor::{},\
-				dst_factor: blend_formula::BlendFactor::{},\
-				operation: blend_formula::BlendOperation::{},\
-			}}",
-			src_factor_name,
-			dst_factor_name,
-			op_name,
-		)
+		Err((_, err)) => Err(err)
 	}
-	
-	 // Invalid Formula:
-	panic!("formula must evaluate to 'Term*Factor Op Term*Factor', where:\
-		\n- each Term is either 'src' or 'dst' (mutually-exclusive)\
-		\n- each Factor is: '0', '1', 'Term', '1-Term', 'Term.a', '1-Term.a', 'c', '1-c', or 'src.a<1-dst.a'\
-		\n- Op is: '+', '-', '<', or '>'\
-	")
+}
+
+fn format_blend_formula(formula: (&str, &str, &str)) -> String {
+	let (src_factor_name, dst_factor_name, op_name) = formula;
+	format!("\
+		blend_formula::BlendFormula {{\
+			src_factor: blend_formula::BlendFactor::{},\
+			dst_factor: blend_formula::BlendFactor::{},\
+			operation: blend_formula::BlendOperation::{},\
+		}}",
+		src_factor_name,
+		dst_factor_name,
+		op_name,
+	)
 }
 
 fn term_formula(term: Term)
@@ -462,6 +492,8 @@ enum ParseError {
 	AmbiguousComparison,
 	NestedSuffix(Vec<BlendSuffix>),
 	IncompatibleDimension(Term),
+	ExpectedDimension(BlendSuffix, BlendSuffix),
+	InvalidFormula(BlendSuffix),
 }
 
 impl Display for ParseError {
@@ -470,32 +502,43 @@ impl Display for ParseError {
 		const OP_TEXT: &str = "'.', '*', '+', '-', '<', '>'";
 		const SUFFIX_TEXT: &str = "'rgb', 'a'";
 		match self {
-			Self::ExpectedTerm(token) => {
-				write!(f, "expected term ({}); got '{}'", TERM_TEXT, token)
-			},
-			Self::ExpectedTermGotEnd => {
-				write!(f, "expected term ({}); got end", TERM_TEXT)
-			},
-			Self::ExpectedOp(token) => {
-				write!(f, "expected operator ({}); got '{}'", OP_TEXT, token)
-			},
-			Self::ExpectedSuffix(token) => {
-				write!(f, "expected suffix ({}); got '{}'", SUFFIX_TEXT, token)
-			},
-			Self::ExpectedSuffixGotEnd => {
-				write!(f, "expected suffix ({}); got end", SUFFIX_TEXT)
-			},
-			Self::AmbiguousComparison => {
-				write!(f, "chained comparison operators require parentheses")
-			},
-			Self::NestedSuffix(suf_list) => {
-				let mut text = String::new();
-				for suf in suf_list {
-					text.push('.');
-					text.push_str(&suf.to_string());
+			Self::ExpectedTerm(token) => write!(f,
+				"expected term ({}); got '{}'",
+				TERM_TEXT,
+				token
+			),
+			Self::ExpectedTermGotEnd => write!(f,
+				"expected term ({}); got end",
+				TERM_TEXT
+			),
+			Self::ExpectedOp(token) => write!(f,
+				"expected operator ({}); got '{}'",
+				OP_TEXT,
+				token
+			),
+			Self::ExpectedSuffix(token) => write!(f,
+				"expected suffix ({}); got '{}'",
+				SUFFIX_TEXT,
+				token
+			),
+			Self::ExpectedSuffixGotEnd => write!(f,
+				"expected suffix ({}); got end",
+				SUFFIX_TEXT
+			),
+			Self::AmbiguousComparison => write!(f,
+				"chained comparison operators require parentheses"
+			),
+			Self::NestedSuffix(suf_list) => write!(f,
+				"terms can only have one suffix each; got '{}'",
+				{
+					let mut text = String::new();
+					for suf in suf_list {
+						text.push('.');
+						text.push_str(&suf.to_string());
+					}
+					text
 				}
-				write!(f, "terms can only have one suffix each; got '{}'", text)
-			},
+			),
 			Self::IncompatibleDimension(term) => match term {
 				Term::SuffixTerm(a, suf) => write!(f,
 					"can't apply the suffix '{}' to a {} term",
@@ -523,6 +566,32 @@ impl Display for ParseError {
 				),
 				term => write!(f, "this error shouldn't occur: {:?}", term),
 			},
+			Self::ExpectedDimension(dimension, got_dimension) => write!(f,
+				"expected a formula for '{}'; got a formula for '{}'",
+				dimension,
+				got_dimension
+			),
+			Self::InvalidFormula(dimension) => write!(f,
+				"{0} formula must evaluate to 'Term{1}*Factor Op Term{1}*Factor', where:\
+				\n- each Term is either 'src' or 'dst' (mutually exclusive)\
+				\n- each Factor is: '0', '1', 'Term{1}', '1-Term{1}'{2}, 'c{1}', or '1-c{1}'\
+				\n- Op is: '+', '-', '<', or '>'",
+				match dimension {
+					BlendSuffix::Full  => "blend",
+					BlendSuffix::Color => "color",
+					BlendSuffix::Alpha => "alpha",
+				},
+				match dimension {
+					BlendSuffix::Full  => "",
+					BlendSuffix::Color => ".rgb",
+					BlendSuffix::Alpha => ".a",
+				},
+				match dimension {
+					BlendSuffix::Full  => ", 'Term.a', '1-Term.a'",
+					BlendSuffix::Color => ", 'Term.a', '1-Term.a', 'src.a<(1-dst.a)'",
+					BlendSuffix::Alpha => "",
+				},
+			),
 		}
 	}
 }
