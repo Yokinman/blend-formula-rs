@@ -1,7 +1,7 @@
 [package]
 name = "blend-formula"
 description = "macros for defining GPU blend modes from arbitrary formulae"
-repository = "https://github.com/Yokinman/blend-formula-rs" 
+repository = "https://github.com/Yokinman/blend-formula-rs"
 authors = ["Yokin"]
 version = "0.1.0"
 edition = "2021"
